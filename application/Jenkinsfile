@@ -25,7 +25,7 @@ pipeline {
                 script {
                     echo "Building Docker image: ${DOCKER_IMAGE}:${IMAGE_TAG}"
                     sh """
-                        docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} .
+                        docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} ./application
                         docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${DOCKER_IMAGE}:latest
                     """
                 }
