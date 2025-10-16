@@ -2,22 +2,27 @@ pipeline {
     agent any
 
     environment {
-        DOCKERHUB_USER = 'dwija18'                 // Docker Hub username
-        DOCKERHUB_PSW  = credentials('dockerhub') // Docker Hub password stored in Jenkins
-        K8S_TOKEN      = credentials('k8s-token') // Kubernetes token stored in Jenkins
-        IMAGE_NAME     = 'dwija18/myapp'
-        IMAGE_TAG      = "11"                       // increment as needed
-        NAMESPACE      = 'blue-green'
-        SERVICE_NAME   = 'myapp-service'
+        DOCKERHUB_USER = 'dwija18'                // your Docker Hub username
+        DOCKERHUB_PSW  = credentials('dockerhub-credentials')
+        K8S_TOKEN      = credentials('k8s-token') // Jenkins credential ID for Docker Hub password
+        IMAGE_NAME     = "dwija18/myapp"
+        IMAGE_TAG      = "latest"
+        K8S_NAMESPACE  = "blue-green"
+        K8S_SERVICE    = "myapp-service"
+        K8S_COLOR_ACTIVE = "blue"
+        K8S_COLOR_INACTIVE = "green"
+
     }
 
     stages {
+
         stage('Checkout SCM') {
             steps {
                 checkout scm
                 script {
-                    sh 'git rev-parse --short HEAD > commit.txt'
-                    echo "Checked out commit: $(cat commit.txt)"
+                    // Get current commit hash
+                    def commit = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    echo "Checked out commit: ${commit}"
                 }
             }
         }
@@ -25,18 +30,20 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
-                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./application"
-                    sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest"
+                    sh """
+                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./application
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                    """
+                    echo "Docker image built: ${IMAGE_NAME}:${IMAGE_TAG}"
                 }
             }
         }
 
         stage('Push to Docker Hub') {
             steps {
-                withCredentials([string(credentialsId: 'dockerhub', variable: 'DOCKERHUB_PSW')]) {
+                script {
                     sh """
-                        echo $DOCKERHUB_PSW | docker login -u $DOCKERHUB_USER --password-stdin
+                        echo ${DOCKERHUB_PSW} | docker login -u ${DOCKERHUB_USER} --password-stdin
                         docker push ${IMAGE_NAME}:${IMAGE_TAG}
                         docker push ${IMAGE_NAME}:latest
                         docker logout
@@ -45,25 +52,27 @@ pipeline {
             }
         }
 
-        stage('Deploy to Inactive Environment') {
+        stage('Check Current Active Environment') {
             steps {
-                withCredentials([string(credentialsId: 'k8s-token', variable: 'K8S_TOKEN')]) {
-                    sh """
-                        export KUBECONFIG=/tmp/kubeconfig
-                        kubectl --token=$K8S_TOKEN -n $NAMESPACE set image deployment/myapp-inactive myapp=${IMAGE_NAME}:${IMAGE_TAG}
-                        kubectl --token=$K8S_TOKEN -n $NAMESPACE rollout status deployment/myapp-inactive
-                    """
+                script {
+                    // Determine current active color
+                    env.CURRENT_COLOR = sh(
+                        script: "kubectl get service ${K8S_SERVICE} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.selector.color}'",
+                        returnStdout: true
+                    ).trim()
+
+                    env.NEXT_COLOR = (env.CURRENT_COLOR == K8S_COLOR_ACTIVE) ? K8S_COLOR_INACTIVE : K8S_COLOR_ACTIVE
+                    echo "Current active color: ${env.CURRENT_COLOR}, Deploying to: ${env.NEXT_COLOR}"
                 }
             }
         }
 
-        stage('Switch Traffic') {
+        stage('Deploy to Inactive Environment') {
             steps {
-                withCredentials([string(credentialsId: 'k8s-token', variable: 'K8S_TOKEN')]) {
+                script {
                     sh """
-                        export KUBECONFIG=/tmp/kubeconfig
-                        # Switch service selector to new color
-                        kubectl --token=$K8S_TOKEN -n $NAMESPACE patch service $SERVICE_NAME -p '{"spec":{"selector":{"color":"green"}}}'
+                        kubectl apply -f ./k8s/deployment-${env.NEXT_COLOR}.yaml -n ${K8S_NAMESPACE}
+                        kubectl rollout status deployment/myapp-${env.NEXT_COLOR} -n ${K8S_NAMESPACE}
                     """
                 }
             }
@@ -71,21 +80,50 @@ pipeline {
 
         stage('Run Smoke Tests') {
             steps {
-                echo "Add smoke test commands here..."
+                script {
+                    // Optional: add actual smoke test commands
+                    echo "Running smoke tests on ${env.NEXT_COLOR} environment..."
+                }
+            }
+        }
+
+        stage('Switch Traffic') {
+            steps {
+                script {
+                    sh """
+                        kubectl patch service ${K8S_SERVICE} -n ${K8S_NAMESPACE} \
+                        -p '{"spec":{"selector":{"color":"${env.NEXT_COLOR}"}}}'
+                    """
+                    echo "Traffic switched to ${env.NEXT_COLOR} environment"
+                }
+            }
+        }
+
+        stage('Update Previous Environment') {
+            steps {
+                script {
+                    sh """
+                        kubectl set image deployment/myapp-${env.CURRENT_COLOR} myapp=${IMAGE_NAME}:${IMAGE_TAG} -n ${K8S_NAMESPACE} || true
+                        echo "Previous environment (${env.CURRENT_COLOR}) updated."
+                    """
+                }
             }
         }
     }
 
     post {
+        success {
+            echo '✅ Deployment Successful!'
+        }
         failure {
+            echo '❌ Deployment Failed! Attempting rollback...'
             script {
-                withCredentials([string(credentialsId: 'k8s-token', variable: 'K8S_TOKEN')]) {
+                if (env.CURRENT_COLOR) {
                     sh """
-                        export KUBECONFIG=/tmp/kubeconfig
-                        echo "Deployment failed! Rolling back..."
-                        # Rollback service selector
-                        kubectl --token=$K8S_TOKEN -n $NAMESPACE patch service $SERVICE_NAME -p '{"spec":{"selector":{"color":"null"}}}'
+                        kubectl patch service ${K8S_SERVICE} -n ${K8S_NAMESPACE} \
+                        -p '{"spec":{"selector":{"color":"${env.CURRENT_COLOR}"}}}'
                     """
+                    echo "Rolled back traffic to ${env.CURRENT_COLOR}"
                 }
             }
         }
