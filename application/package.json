@@ -1,0 +1,19 @@
+{
+  "name": "blue-green-app",
+  "version": "1.0.0",
+  "description": "Blue-Green Deployment Demo Application",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "keywords": ["blue-green", "deployment", "demo"],
+  "author": "DevOps Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

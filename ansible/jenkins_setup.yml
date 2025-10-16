@@ -1,0 +1,168 @@
+---
+- name: Configure Jenkins Server with Docker and Kubernetes
+  hosts: jenkins
+  become: yes
+  vars:
+    docker_users:
+      - ubuntu
+      - jenkins
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - python3-pip
+          - git
+          - vim
+          - wget
+          - unzip
+          - conntrack
+        state: present
+
+    - name: Install OpenJDK 17
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Set JAVA_HOME
+      lineinfile:
+        path: /etc/environment
+        line: 'JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"'
+        create: yes
+
+    - name: Add Jenkins GPG key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: 'deb https://pkg.jenkins.io/debian-stable binary/'
+        state: present
+        filename: jenkins
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Jenkins
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+
+    - name: Download kubectl
+      get_url:
+        url: https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Download Minikube
+      get_url:
+        url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        dest: /usr/local/bin/minikube
+        mode: '0755'
+
+    - name: Install Maven
+      apt:
+        name: maven
+        state: present
+
+    - name: Wait for Jenkins to start
+      wait_for:
+        port: 8080
+        delay: 10
+        timeout: 300
+
+    - name: Get Jenkins initial admin password
+      slurp:
+        src: /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_initial_password
+
+    - name: Create .kube directory for Jenkins user
+      file:
+        path: /var/lib/jenkins/.kube
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Create .kube directory for ubuntu user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Ensure Jenkins can run Docker commands
+      file:
+        path: /var/run/docker.sock
+        mode: '0666'
+
+    - name: Restart Jenkins to apply group changes
+      systemd:
+        name: jenkins
+        state: restarted
+
+    - name: Wait for Jenkins to restart
+      wait_for:
+        port: 8080
+        delay: 10
+        timeout: 60
+
+    - name: Display completion message
+      debug:
+        msg:
+          - "=========================================="
+          - "Jenkins installation completed!"
+          - "Access Jenkins at: http://{{ ansible_host }}:8080"
+          - "Initial admin password: {{ jenkins_initial_password.content | b64decode }}"
+          - "=========================================="
