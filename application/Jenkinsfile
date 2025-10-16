@@ -2,10 +2,10 @@ pipeline {
     agent any
 
     environment {
-        DOCKERHUB_USER = 'dwija18'                // your Docker Hub username
+        DOCKERHUB_USER = 'dwijavanthi'                // your Docker Hub username
         DOCKERHUB_PSW  = credentials('dockerhub-credentials')
         K8S_TOKEN      = credentials('k8s-token') // Jenkins credential ID for Docker Hub password
-        IMAGE_NAME     = "dwija18/myapp"
+        IMAGE_NAME     = "dwijavanthi/myapp"
         IMAGE_TAG      = "latest"
         K8S_NAMESPACE  = "blue-green"
         K8S_SERVICE    = "myapp-service"
