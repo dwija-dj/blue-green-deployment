@@ -33,16 +33,14 @@ pipeline {
         stage('Push Docker Image') {
             steps {
                 withCredentials([string(credentialsId: 'dockerhub-credentials', variable: 'DOCKERHUB_PSW')]) {
-                    script {
-                        sh """
-                        echo \$DOCKERHUB_PSW | docker login -u ${DOCKER_USER} --password-stdin
-                        docker push ${IMAGE_TAG}
-                        """
-                        echo "Docker image pushed: ${IMAGE_TAG}"
-                    }
+                    sh '''
+                        echo $DOCKERHUB_PSW | docker login -u dwijavanthi --password-stdin
+                        docker push dwijavanthi/myapp:latest
+                    '''
                 }
             }
         }
+
 
         stage('Check Current Active Environment') {
             steps {
