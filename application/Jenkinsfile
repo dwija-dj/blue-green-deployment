@@ -2,8 +2,6 @@ pipeline {
     agent any
 
     environment {
-        // Define credentials object for use with withCredentials
-        DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')
         DOCKER_IMAGE = 'dwija18/myapp'
         IMAGE_TAG = "${BUILD_NUMBER}"
         KUBE_NAMESPACE = 'blue-green'
@@ -17,6 +15,7 @@ pipeline {
                         script: "git rev-parse --short HEAD",
                         returnStdout: true
                     ).trim()
+                    echo "Checked out commit: ${env.GIT_COMMIT_SHORT}"
                 }
             }
         }
@@ -26,10 +25,6 @@ pipeline {
                 script {
                     echo "Building Docker image: ${DOCKER_IMAGE}:${IMAGE_TAG}"
                     sh """
-                        # We are currently in /var/lib/jenkins/workspace/blue-green-pipeline/application/
-                        # If Dockerfile is in the application folder, use: docker build -t ... .
-                        # If Dockerfile is in the project root: cd .. && docker build -t ... .
-                        # Assuming Dockerfile is in the application folder based on your file listing.
                         docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} .
                         docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${DOCKER_IMAGE}:latest
                     """
@@ -39,10 +34,11 @@ pipeline {
 
         stage('Push to Docker Hub') {
             steps {
-                // Correct way to securely handle credentials
-                withCredentials([env.DOCKERHUB_CREDENTIALS]) {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
+                                                 usernameVariable: 'DOCKERHUB_USR',
+                                                 passwordVariable: 'DOCKERHUB_PSW')]) {
                     sh """
-                        echo "${DOCKERHUB_CREDENTIALS_PSW}" | docker login -u "${DOCKERHUB_CREDENTIALS_USR}" --password-stdin
+                        echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin
                         docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
                         docker push ${DOCKER_IMAGE}:latest
                     """
@@ -53,8 +49,6 @@ pipeline {
         stage('Check Current Active Environment') {
             steps {
                 script {
-                    // This logic is complex and prone to failure if the service doesn't exist. 
-                    // To guarantee a color for the first run, we use a Groovy default.
                     def selectorOutput
                     try {
                         selectorOutput = sh(
@@ -62,10 +56,9 @@ pipeline {
                             returnStdout: true
                         ).trim()
                     } catch (e) {
-                        // Service/Selector might not exist yet, default to 'blue'
                         selectorOutput = 'blue'
                     }
-                    
+
                     env.CURRENT_COLOR = selectorOutput
                     env.TARGET_COLOR = (env.CURRENT_COLOR == 'blue') ? 'green' : 'blue'
 
@@ -74,8 +67,6 @@ pipeline {
                 }
             }
         }
-        
-        // ... (Stages 5, 6, 7, 8 remain the same) ...
 
         stage('Deploy to Inactive Environment') {
             steps {
@@ -84,30 +75,30 @@ pipeline {
                     sh """
                         kubectl set image deployment/myapp-${env.TARGET_COLOR} \
                             myapp=${DOCKER_IMAGE}:${IMAGE_TAG} \
-                            -n ${env.KUBE_NAMESPACE} --record
+                            -n ${KUBE_NAMESPACE} --record
 
-                        kubectl rollout status deployment/myapp-${env.TARGET_COLOR} -n ${env.KUBE_NAMESPACE}
+                        kubectl rollout status deployment/myapp-${env.TARGET_COLOR} -n ${KUBE_NAMESPACE}
                     """
                 }
             }
         }
-        
+
         stage('Run Smoke Tests') {
             steps {
                 script {
                     echo "Running smoke tests on ${env.TARGET_COLOR} environment..."
                     sleep 10
-                    
+
                     def podName = sh(
-                        script: "kubectl get pods -n ${env.KUBE_NAMESPACE} -l color=${env.TARGET_COLOR} -o jsonpath='{.items[0].metadata.name}'",
+                        script: "kubectl get pods -n ${KUBE_NAMESPACE} -l color=${env.TARGET_COLOR} -o jsonpath='{.items[0].metadata.name}'",
                         returnStdout: true
                     ).trim()
-                    
+
                     sh """
-                        kubectl exec ${podName} -n ${env.KUBE_NAMESPACE} -- curl -f http://localhost:3000/health || exit 1
-                        kubectl exec ${podName} -n ${env.KUBE_NAMESPACE} -- curl -f http://localhost:3000/ || exit 1
+                        kubectl exec ${podName} -n ${KUBE_NAMESPACE} -- curl -f http://localhost:3000/health || exit 1
+                        kubectl exec ${podName} -n ${KUBE_NAMESPACE} -- curl -f http://localhost:3000/ || exit 1
                     """
-                    
+
                     echo "✓ Smoke tests passed!"
                 }
             }
@@ -119,7 +110,7 @@ pipeline {
                 script {
                     echo "Switching traffic to ${env.TARGET_COLOR}..."
                     sh """
-                        kubectl patch service myapp-service -n ${env.KUBE_NAMESPACE} \
+                        kubectl patch service myapp-service -n ${KUBE_NAMESPACE} \
                             -p '{"spec":{"selector":{"color":"${env.TARGET_COLOR}"}}}'
                     """
                     echo "✓ Traffic switched to ${env.TARGET_COLOR}!"
@@ -134,9 +125,9 @@ pipeline {
                     sh """
                         kubectl set image deployment/myapp-${env.CURRENT_COLOR} \
                             myapp=${DOCKER_IMAGE}:${IMAGE_TAG} \
-                            -n ${env.KUBE_NAMESPACE} --record
+                            -n ${KUBE_NAMESPACE} --record
 
-                        kubectl rollout status deployment/myapp-${env.CURRENT_COLOR} -n ${env.KUBE_NAMESPACE}
+                        kubectl rollout status deployment/myapp-${env.CURRENT_COLOR} -n ${KUBE_NAMESPACE}
                     """
                 }
             }
@@ -149,21 +140,24 @@ pipeline {
             echo "Active environment: ${env.TARGET_COLOR}"
             echo "Version: ${env.IMAGE_TAG}"
         }
+
         failure {
             echo '✗ Deployment Failed! Attempting rollback...'
-            // CRITICAL FIX: Ensure all env vars are referenced with 'env.' inside the post block
             script {
                 sh """
-                    kubectl patch service myapp-service -n ${env.KUBE_NAMESPACE} \
+                    kubectl patch service myapp-service -n ${KUBE_NAMESPACE} \
                         -p '{"spec":{"selector":{"color":"${env.CURRENT_COLOR}"}}}'
                     echo "Service rolled back to ${env.CURRENT_COLOR}"
                 """
             }
         }
+
         always {
-            // CRITICAL FIX: Wrapped sh step in a script block and used 'env' vars
             script {
-                withCredentials([env.DOCKERHUB_CREDENTIALS]) {
+                // Properly logout from Docker
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
+                                                 usernameVariable: 'DOCKERHUB_USR',
+                                                 passwordVariable: 'DOCKERHUB_PSW')]) {
                     sh 'docker logout'
                 }
             }
