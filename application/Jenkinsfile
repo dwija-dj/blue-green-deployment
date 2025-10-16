@@ -26,10 +26,10 @@ pipeline {
                 script {
                     echo "Building Docker image: ${DOCKER_IMAGE}:${IMAGE_TAG}"
                     sh """
-                        # The 'application' folder contains the Dockerfile.
-                        # We change directory to the application folder to ensure the build context is correct.
-                        # Based on your file structure, the Dockerfile is in the root, so we change directory back to the workspace root:
-                        cd ..
+                        # We are currently in /var/lib/jenkins/workspace/blue-green-pipeline/application/
+                        # If Dockerfile is in the application folder, use: docker build -t ... .
+                        # If Dockerfile is in the project root: cd .. && docker build -t ... .
+                        # Assuming Dockerfile is in the application folder based on your file listing.
                         docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} .
                         docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${DOCKER_IMAGE}:latest
                     """
@@ -39,10 +39,9 @@ pipeline {
 
         stage('Push to Docker Hub') {
             steps {
-                // Correct way to securely handle credentials in Declarative Pipeline
+                // Correct way to securely handle credentials
                 withCredentials([env.DOCKERHUB_CREDENTIALS]) {
                     sh """
-                        # Use the injected environment variables
                         echo "${DOCKERHUB_CREDENTIALS_PSW}" | docker login -u "${DOCKERHUB_CREDENTIALS_USR}" --password-stdin
                         docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
                         docker push ${DOCKER_IMAGE}:latest
@@ -54,61 +53,59 @@ pipeline {
         stage('Check Current Active Environment') {
             steps {
                 script {
-                    // Check the current color selector in the service
-                    def currentColor = sh(
-                        script: "kubectl get service myapp-service -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.selector.color}'",
-                        returnStdout: true,
-                        // Allow the command to fail gracefully (e.g., if service is new/empty)
-                        // This uses a default color of 'blue' if the command fails to find the selector
-                        returnStatus: true
-                    )
-                    
-                    // If the command succeeded, use the output; otherwise, assume 'blue' is current.
-                    // This logic is safer in a Groovy script block.
-                    def selectorOutput = sh(
-                        script: "kubectl get service myapp-service -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.selector.color}' || echo 'blue'",
-                        returnStdout: true
-                    ).trim()
+                    // This logic is complex and prone to failure if the service doesn't exist. 
+                    // To guarantee a color for the first run, we use a Groovy default.
+                    def selectorOutput
+                    try {
+                        selectorOutput = sh(
+                            script: "kubectl get service myapp-service -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.selector.color}'",
+                            returnStdout: true
+                        ).trim()
+                    } catch (e) {
+                        // Service/Selector might not exist yet, default to 'blue'
+                        selectorOutput = 'blue'
+                    }
                     
                     env.CURRENT_COLOR = selectorOutput
                     env.TARGET_COLOR = (env.CURRENT_COLOR == 'blue') ? 'green' : 'blue'
 
-                    echo "Current active environment: ${CURRENT_COLOR}"
-                    echo "Deploying to: ${TARGET_COLOR}"
+                    echo "Current active environment: ${env.CURRENT_COLOR}"
+                    echo "Deploying to: ${env.TARGET_COLOR}"
                 }
             }
         }
+        
+        // ... (Stages 5, 6, 7, 8 remain the same) ...
 
         stage('Deploy to Inactive Environment') {
             steps {
                 script {
-                    echo "Deploying to ${TARGET_COLOR} environment..."
+                    echo "Deploying to ${env.TARGET_COLOR} environment..."
                     sh """
-                        kubectl set image deployment/myapp-${TARGET_COLOR} \
+                        kubectl set image deployment/myapp-${env.TARGET_COLOR} \
                             myapp=${DOCKER_IMAGE}:${IMAGE_TAG} \
-                            -n ${KUBE_NAMESPACE} --record
+                            -n ${env.KUBE_NAMESPACE} --record
 
-                        kubectl rollout status deployment/myapp-${TARGET_COLOR} -n ${KUBE_NAMESPACE}
+                        kubectl rollout status deployment/myapp-${env.TARGET_COLOR} -n ${env.KUBE_NAMESPACE}
                     """
                 }
             }
         }
-
+        
         stage('Run Smoke Tests') {
             steps {
                 script {
-                    echo "Running smoke tests on ${TARGET_COLOR} environment..."
-                    sleep 10 
+                    echo "Running smoke tests on ${env.TARGET_COLOR} environment..."
+                    sleep 10
                     
                     def podName = sh(
-                        script: "kubectl get pods -n ${KUBE_NAMESPACE} -l color=${TARGET_COLOR} -o jsonpath='{.items[0].metadata.name}'",
+                        script: "kubectl get pods -n ${env.KUBE_NAMESPACE} -l color=${env.TARGET_COLOR} -o jsonpath='{.items[0].metadata.name}'",
                         returnStdout: true
                     ).trim()
                     
                     sh """
-                        # Test Health and Root Endpoints inside the new pod
-                        kubectl exec ${podName} -n ${KUBE_NAMESPACE} -- curl -f http://localhost:3000/health || exit 1
-                        kubectl exec ${podName} -n ${KUBE_NAMESPACE} -- curl -f http://localhost:3000/ || exit 1
+                        kubectl exec ${podName} -n ${env.KUBE_NAMESPACE} -- curl -f http://localhost:3000/health || exit 1
+                        kubectl exec ${podName} -n ${env.KUBE_NAMESPACE} -- curl -f http://localhost:3000/ || exit 1
                     """
                     
                     echo "✓ Smoke tests passed!"
@@ -118,15 +115,14 @@ pipeline {
 
         stage('Switch Traffic') {
             steps {
-                // Manual approval gate
-                input message: "Switch traffic to ${TARGET_COLOR} environment?", ok: 'Deploy to Production'
+                input message: "Switch traffic to ${env.TARGET_COLOR} environment?", ok: 'Deploy to Production'
                 script {
-                    echo "Switching traffic to ${TARGET_COLOR}..."
+                    echo "Switching traffic to ${env.TARGET_COLOR}..."
                     sh """
-                        kubectl patch service myapp-service -n ${KUBE_NAMESPACE} \
-                            -p '{"spec":{"selector":{"color":"${TARGET_COLOR}"}}}'
+                        kubectl patch service myapp-service -n ${env.KUBE_NAMESPACE} \
+                            -p '{"spec":{"selector":{"color":"${env.TARGET_COLOR}"}}}'
                     """
-                    echo "✓ Traffic switched to ${TARGET_COLOR}!"
+                    echo "✓ Traffic switched to ${env.TARGET_COLOR}!"
                 }
             }
         }
@@ -134,13 +130,13 @@ pipeline {
         stage('Update Previous Environment') {
             steps {
                 script {
-                    echo "Updating ${CURRENT_COLOR} environment with new version..."
+                    echo "Updating ${env.CURRENT_COLOR} environment with new version..."
                     sh """
-                        kubectl set image deployment/myapp-${CURRENT_COLOR} \
+                        kubectl set image deployment/myapp-${env.CURRENT_COLOR} \
                             myapp=${DOCKER_IMAGE}:${IMAGE_TAG} \
-                            -n ${KUBE_NAMESPACE} --record
+                            -n ${env.KUBE_NAMESPACE} --record
 
-                        kubectl rollout status deployment/myapp-${CURRENT_COLOR} -n ${KUBE_NAMESPACE}
+                        kubectl rollout status deployment/myapp-${env.CURRENT_COLOR} -n ${env.KUBE_NAMESPACE}
                     """
                 }
             }
@@ -155,19 +151,21 @@ pipeline {
         }
         failure {
             echo '✗ Deployment Failed! Attempting rollback...'
-            // CRITICAL FIX: Wrapped sh step in a script block
+            // CRITICAL FIX: Ensure all env vars are referenced with 'env.' inside the post block
             script {
                 sh """
-                    kubectl patch service myapp-service -n ${KUBE_NAMESPACE} \
+                    kubectl patch service myapp-service -n ${env.KUBE_NAMESPACE} \
                         -p '{"spec":{"selector":{"color":"${env.CURRENT_COLOR}"}}}'
                     echo "Service rolled back to ${env.CURRENT_COLOR}"
                 """
             }
         }
         always {
-            // CRITICAL FIX: Wrapped sh step in a script block
+            // CRITICAL FIX: Wrapped sh step in a script block and used 'env' vars
             script {
-                sh 'docker logout'
+                withCredentials([env.DOCKERHUB_CREDENTIALS]) {
+                    sh 'docker logout'
+                }
             }
         }
     }
