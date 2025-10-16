@@ -10,3 +10,6 @@ terraform.tfvars
 terraform.tfvars.json
 override.tf
 override.tf.json
+/target/
+/build/
+*.class
